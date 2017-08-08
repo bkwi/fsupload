@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"mime"
+	"mime/multipart"
+	"net/http"
 	"os"
 	"path"
 	"time"
@@ -45,8 +49,8 @@ type UploadData struct {
 
 // UploadSettings comments
 type UploadSettings struct {
-	apikey          string
-	storageLocation string
+	apikey        string
+	storeLocation string
 }
 
 type startResponse struct {
@@ -55,7 +59,39 @@ type startResponse struct {
 	uploadID string
 }
 
+type startRequestData struct {
+	ApiKey        string `json:"apikey"`
+	StoreLocation string `json:"store_location"`
+	Mimetype      string `json:"mimetype"`
+	Filename      string `json:"filename"`
+	Size          int64  `json:"size"`
+}
+
 func multipartStart(content UploadData, settings UploadSettings) startResponse {
+
+	reqParams := startRequestData{
+		ApiKey:        settings.apikey,
+		StoreLocation: settings.storeLocation,
+		Mimetype:      content.mimetype,
+		Filename:      content.filename,
+		Size:          content.size,
+	}
+	jsonData, _ := json.Marshal(reqParams)
+	var b bytes.Buffer
+	x := multipart.NewWriter(&b)
+	x.CreateFormField("apikey")
+	err := x.Close()
+	fmt.Println("HHHHHERE:", jsonData)
+	req, err := http.NewRequest("POST", "https://requestb.in/z9spndz9", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=lol")
+	fmt.Println(req, err)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	fmt.Println(resp, err)
 	return startResponse{}
 }
 
@@ -119,7 +155,7 @@ func upload(content UploadData, settings UploadSettings) {
 }
 
 func main() {
-	filepath := "/Users/bartosz/Desktop/test_files/ball.png"
+	filepath := "test_files/1.jpg"
 	f, err := os.Open(filepath)
 
 	if err != nil {
