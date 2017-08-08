@@ -77,13 +77,19 @@ func multipartStart(content UploadData, settings UploadSettings) startResponse {
 		Size:          content.size,
 	}
 	jsonData, _ := json.Marshal(reqParams)
+	size := string(reqParams.Size)
 	var b bytes.Buffer
 	x := multipart.NewWriter(&b)
-	x.CreateFormField("apikey")
+	x.WriteField("apikey", reqParams.ApiKey)
+	x.WriteField("size", size)
+	x.WriteField("filename", reqParams.Filename)
+	x.WriteField("mimetype", reqParams.Mimetype)
+	x.WriteField("store_location", reqParams.StoreLocation)
 	err := x.Close()
 	fmt.Println("HHHHHERE:", jsonData)
-	req, err := http.NewRequest("POST", "https://requestb.in/z9spndz9", bytes.NewBuffer(jsonData))
-	req.Header.Set("Content-Type", "multipart/form-data; boundary=lol")
+	// req, err := http.NewRequest("POST", "https://requestb.in/z9spndz9", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", "https://requestb.in/z9spndz9", &b)
+	req.Header.Set("Content-Type", x.FormDataContentType())
 	fmt.Println(req, err)
 	client := &http.Client{}
 	resp, err := client.Do(req)
