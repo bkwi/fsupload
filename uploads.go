@@ -64,6 +64,10 @@ type startResponse struct {
 	UploadID string `json:"upload_id"`
 }
 
+type filelinkResponse struct {
+	URL string `json:"url"`
+}
+
 type uploadInitResponse struct {
 	URL     string
 	Headers map[string]string
@@ -92,7 +96,6 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 	reader := io.NewSectionReader(f, 0, size)
 	for job := range uc {
 		buff := make([]byte, job.size)
-		fmt.Println("Got job", job)
 		reader.Seek(int64(job.offset), 0)
 		_, err := reader.Read(buff)
 		if err != nil {
@@ -185,6 +188,39 @@ func multipartStart(content UploadData, settings UploadSettings) startResponse {
 	return sresp
 }
 
+func multipartComplete(content UploadData, settings UploadSettings, sresp startResponse, etags string) string {
+	var b bytes.Buffer
+	x := multipart.NewWriter(&b)
+	x.WriteField("apikey", settings.apikey)
+	x.WriteField("uri", sresp.URI)
+	x.WriteField("region", sresp.Region)
+	x.WriteField("upload_id", sresp.UploadID)
+	x.WriteField("filename", content.filename)
+	x.WriteField("size", strconv.Itoa(int(content.size)))
+	x.WriteField("mimetype", content.mimetype)
+	x.WriteField("parts", etags)
+	x.WriteField("store_location", settings.storeLocation)
+
+	err := x.Close()
+	req, err := http.NewRequest("POST", multipartCompleteURL, &b)
+	req.Header.Set("Content-Type", x.FormDataContentType())
+
+	resp, err := (&http.Client{}).Do(req)
+	defer resp.Body.Close()
+
+	if err != nil {
+		panic(err)
+	}
+
+	var flink filelinkResponse
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&flink); err != nil {
+		panic(err)
+	}
+
+	return flink.URL
+}
+
 func upload(content UploadData, settings UploadSettings) {
 
 	sresp := multipartStart(content, settings)
@@ -220,7 +256,9 @@ func upload(content UploadData, settings UploadSettings) {
 		etags += strconv.Itoa(resp.part) + ":" + resp.etag
 		bytesLeft -= int64(resp.bytesSent)
 	}
-	fmt.Println("done")
+
+	final := multipartComplete(content, settings, sresp, etags)
+	fmt.Println("done", final)
 
 }
 
@@ -237,5 +275,4 @@ func main() {
 	content := UploadData{f, stat.Name(), stat.Size(), mimetype}
 	settings := UploadSettings{"AZ25y30ZiRnG7ahX6iMYLz", "s3"}
 	upload(content, settings)
-	// fmt.Println(mime.TypeByExtension(".zip"))
 }
