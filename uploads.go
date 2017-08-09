@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,18 +14,16 @@ import (
 	"os"
 	"path"
 	"strconv"
-	"time"
 )
 
-const workersCount int = 1
+const workersCount int = 3
 const partSize int = 1024 * 1024 * 5
 
 // const partSize int = 20 * 1024
 
-// MultipartStartURL bla
-const MultipartStartURL = "https://upload.filestackapi.com/multipart/start"
-const MultipartUploadURL = "https://upload.filestackapi.com/multipart/upload"
-const MultipartCompleteURL = "https://upload.filestackapi.com/multipart/complete"
+const multipartStartURL = "https://upload.filestackapi.com/multipart/start"
+const multipartUploadURL = "https://upload.filestackapi.com/multipart/upload"
+const multipartCompleteURL = "https://upload.filestackapi.com/multipart/complete"
 
 // UploadJob channel bla bla
 type UploadJob struct {
@@ -41,7 +39,9 @@ type UploadJob struct {
 // Response bla bla
 type Response struct {
 	success   bool
+	part      int
 	bytesSent int
+	etag      string
 }
 
 // UploadData a
@@ -66,7 +66,7 @@ type startResponse struct {
 
 type uploadInitResponse struct {
 	URL     string
-	Headers interface{}
+	Headers map[string]string
 }
 
 type startRequestData struct {
@@ -93,7 +93,6 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 	for job := range uc {
 		buff := make([]byte, job.size)
 		fmt.Println("Got job", job)
-		time.Sleep(10 * time.Millisecond)
 		reader.Seek(int64(job.offset), 0)
 		_, err := reader.Read(buff)
 		if err != nil {
@@ -109,12 +108,13 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 		x.WriteField("uri", job.sresp.URI)
 		x.WriteField("region", job.sresp.Region)
 		x.WriteField("upload_id", job.sresp.UploadID)
+
 		h := md5.New()
 		h.Write(buff)
-		x.WriteField("md5", hex.EncodeToString(h.Sum(nil)))
+		x.WriteField("md5", base64.StdEncoding.EncodeToString(h.Sum(nil)))
 
 		err = x.Close()
-		req, err := http.NewRequest("POST", MultipartUploadURL, &b)
+		req, err := http.NewRequest("POST", multipartUploadURL, &b)
 		req.Header.Set("Content-Type", x.FormDataContentType())
 
 		resp, err := (&http.Client{}).Do(req)
@@ -124,16 +124,24 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 			panic(err)
 		}
 
-		fmt.Println("RESPONSE:", resp)
 		var uiresp uploadInitResponse
 		dec := json.NewDecoder(resp.Body)
 		if err := dec.Decode(&uiresp); err != nil {
 			panic(err)
 		}
-		fmt.Println(uiresp)
 
-		// md := md5.Sum(buff)
-		rc <- Response{}
+		req, err = http.NewRequest("PUT", uiresp.URL, bytes.NewReader(buff))
+		for k, v := range uiresp.Headers {
+			req.Header.Set(k, v)
+		}
+
+		s3resp, err := (&http.Client{}).Do(req)
+		defer s3resp.Body.Close()
+		if err != nil {
+			panic(err)
+		}
+
+		rc <- Response{true, job.num, job.size, s3resp.Header.Get("ETag")}
 	}
 }
 
@@ -158,7 +166,7 @@ func multipartStart(content UploadData, settings UploadSettings) startResponse {
 	x.WriteField("store_location", reqParams.StoreLocation)
 
 	err := x.Close()
-	req, err := http.NewRequest("POST", MultipartStartURL, &b)
+	req, err := http.NewRequest("POST", multipartStartURL, &b)
 	req.Header.Set("Content-Type", x.FormDataContentType())
 
 	resp, err := (&http.Client{}).Do(req)
@@ -182,8 +190,6 @@ func upload(content UploadData, settings UploadSettings) {
 	sresp := multipartStart(content, settings)
 	fmt.Println(sresp)
 
-	// partsNumber := int(math.Ceil(float64(content.size) / float64(partSize)))
-
 	uc := make(chan UploadJob, workersCount) // upload channel
 	rc := make(chan Response, workersCount)  // response channel
 
@@ -192,7 +198,6 @@ func upload(content UploadData, settings UploadSettings) {
 
 	// start upload goroutines
 	for i := 0; i < workersCount; i++ {
-
 		go uploadChunk(content.reader, content.size, uc, rc)
 	}
 
@@ -205,13 +210,22 @@ func upload(content UploadData, settings UploadSettings) {
 		}
 	}(content.reader, uc, settings)
 
-	for {
-		<-rc
+	var etags string
+	bytesLeft := content.size
+	for bytesLeft > 0 {
+		resp := <-rc
+		if etags != "" {
+			etags += ";"
+		}
+		etags += strconv.Itoa(resp.part) + ":" + resp.etag
+		bytesLeft -= int64(resp.bytesSent)
 	}
+	fmt.Println("done")
+
 }
 
 func main() {
-	filepath := "test_files/1.jpg"
+	filepath := "test_files/2.jpg"
 	f, err := os.Open(filepath)
 
 	if err != nil {
