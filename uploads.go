@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -14,19 +17,25 @@ import (
 	"time"
 )
 
-const workersCount int = 5
-const partSize int = 1024 * 1024
+const workersCount int = 1
+const partSize int = 1024 * 1024 * 5
 
 // const partSize int = 20 * 1024
 
 // MultipartStartURL bla
 const MultipartStartURL = "https://upload.filestackapi.com/multipart/start"
+const MultipartUploadURL = "https://upload.filestackapi.com/multipart/upload"
+const MultipartCompleteURL = "https://upload.filestackapi.com/multipart/complete"
 
 // UploadJob channel bla bla
 type UploadJob struct {
 	// data  []byte
-	bytes [partSize]byte
-	num   int
+	offset        int
+	size          int
+	num           int
+	sresp         startResponse
+	apikey        string
+	storeLocation string
 }
 
 // Response bla bla
@@ -35,20 +44,9 @@ type Response struct {
 	bytesSent int
 }
 
-func uploadChunk(uc chan UploadJob, rc chan Response) {
-	for job := range uc {
-		fmt.Println("Got job", job.num)
-		time.Sleep(10 * time.Millisecond)
-		// time.Sleep(time.Second)
-		// fmt.Println("Awake")
-		// fmt.Println(job.num, "got", workerID)
-		rc <- Response{}
-	}
-}
-
 // UploadData a
 type UploadData struct {
-	reader   io.Reader
+	reader   io.ReaderAt
 	filename string
 	size     int64
 	mimetype string
@@ -66,12 +64,77 @@ type startResponse struct {
 	UploadID string `json:"upload_id"`
 }
 
+type uploadInitResponse struct {
+	URL     string
+	Headers interface{}
+}
+
 type startRequestData struct {
 	APIKey        string `json:"apikey"`
 	StoreLocation string `json:"store_location"`
 	Mimetype      string `json:"mimetype"`
 	Filename      string `json:"filename"`
 	Size          int64  `json:"size"`
+}
+
+type uploadPostRequestData struct {
+	APIKey        string `json:"apikey"`
+	Part          int
+	StoreLocation string `json:"store_location"`
+	Size          int64  `json:"size"`
+	MD5           string
+	URI           string
+	Region        string
+	UploadID      string
+}
+
+func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response) {
+	reader := io.NewSectionReader(f, 0, size)
+	for job := range uc {
+		buff := make([]byte, job.size)
+		fmt.Println("Got job", job)
+		time.Sleep(10 * time.Millisecond)
+		reader.Seek(int64(job.offset), 0)
+		_, err := reader.Read(buff)
+		if err != nil {
+			panic(err)
+		}
+
+		var b bytes.Buffer
+		x := multipart.NewWriter(&b)
+		x.WriteField("apikey", job.apikey)
+		x.WriteField("size", strconv.Itoa(int(job.size)))
+		x.WriteField("store_location", job.storeLocation)
+		x.WriteField("part", strconv.Itoa(int(job.num)))
+		x.WriteField("uri", job.sresp.URI)
+		x.WriteField("region", job.sresp.Region)
+		x.WriteField("upload_id", job.sresp.UploadID)
+		h := md5.New()
+		h.Write(buff)
+		x.WriteField("md5", hex.EncodeToString(h.Sum(nil)))
+
+		err = x.Close()
+		req, err := http.NewRequest("POST", MultipartUploadURL, &b)
+		req.Header.Set("Content-Type", x.FormDataContentType())
+
+		resp, err := (&http.Client{}).Do(req)
+		defer resp.Body.Close()
+
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("RESPONSE:", resp)
+		var uiresp uploadInitResponse
+		dec := json.NewDecoder(resp.Body)
+		if err := dec.Decode(&uiresp); err != nil {
+			panic(err)
+		}
+		fmt.Println(uiresp)
+
+		// md := md5.Sum(buff)
+		rc <- Response{}
+	}
 }
 
 func multipartStart(content UploadData, settings UploadSettings) startResponse {
@@ -129,74 +192,22 @@ func upload(content UploadData, settings UploadSettings) {
 
 	// start upload goroutines
 	for i := 0; i < workersCount; i++ {
-		go uploadChunk(uc, rc)
+
+		go uploadChunk(content.reader, content.size, uc, rc)
 	}
 
-	go func(r io.Reader, uc chan UploadJob) {
+	go func(r io.ReaderAt, uc chan UploadJob, settings UploadSettings) {
 		part := 1
-		job := UploadJob{}
-		buff := make([]byte, partSize)
-		for {
-			b, err := r.Read(buff)
-			fmt.Println("Read bytes", b)
-			if err == io.EOF {
-				break
-			} else if err != nil {
-				panic(err)
-			}
-			copy(job.bytes[:], buff[0:b])
-			job.num = part
-			uc <- job
+		for i := 0; i < int(content.size); i += partSize {
+			end := int(math.Min(float64(i+partSize), float64(content.size)))
+			uc <- UploadJob{i, end - i, part, sresp, settings.apikey, settings.storeLocation}
 			part++
 		}
-	}(content.reader, uc)
+	}(content.reader, uc, settings)
 
 	for {
 		<-rc
 	}
-
-	// parts := make([][]byte, workersCount)
-	// partsInProgress := 0
-
-	// for i := 0; i < workersCount; i++ {
-	// 	parts[i] = make([]byte, partSize)
-	// 	bt, err := content.reader.Read(parts[i])
-
-	// 	if err == io.EOF {
-	// 		break
-	// 	} else if err != nil {
-	// 		panic(err)
-	// 	}
-	// 	partsInProgress++
-
-	// 	uc <- UploadJob{parts[i][:bt], i}
-	// 	go uploadChunk(uc, rc, i)
-
-	// }
-
-	// partsDone := 0
-	// for resp := range rc {
-	// 	partsDone++
-
-	// 	if partsInProgress < partsNumber {
-	// 		bt, err := content.reader.Read(parts[resp.workerID])
-	// 		if err == io.EOF {
-	// 			fmt.Println("OH NO")
-	// 			break
-	// 		} else if err != nil {
-	// 			panic(err)
-	// 		}
-
-	// 		uc <- UploadJob{parts[resp.workerID][:bt], partsInProgress}
-	// 		partsInProgress++
-	// 	}
-
-	// 	if partsDone >= partsNumber {
-	// 		break
-	// 	}
-
-	// }
-
 }
 
 func main() {
