@@ -11,11 +11,15 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"time"
 )
 
 const workersCount int = 5
 const partSize int = 20 * 1024
+
+// MultipartStartURL bla
+const MultipartStartURL = "https://upload.filestackapi.com/multipart/start"
 
 // UploadJob channel bla bla
 type UploadJob struct {
@@ -29,12 +33,12 @@ type Response struct {
 }
 
 func uploadChunk(uc chan UploadJob, rc chan Response, workerID int) {
-	for job := range uc {
+	for range uc {
 		// fmt.Println("Sleep")
 		time.Sleep(10 * time.Millisecond)
 		// time.Sleep(time.Second)
 		// fmt.Println("Awake")
-		fmt.Println(job.num, "got", workerID)
+		// fmt.Println(job.num, "got", workerID)
 		rc <- Response{workerID}
 	}
 }
@@ -54,13 +58,13 @@ type UploadSettings struct {
 }
 
 type startResponse struct {
-	uri      string
-	region   string
-	uploadID string
+	URI      string `json:"uri"`
+	Region   string `json:"region"`
+	UploadID string `json:"upload_id"`
 }
 
 type startRequestData struct {
-	ApiKey        string `json:"apikey"`
+	APIKey        string `json:"apikey"`
 	StoreLocation string `json:"store_location"`
 	Mimetype      string `json:"mimetype"`
 	Filename      string `json:"filename"`
@@ -70,41 +74,47 @@ type startRequestData struct {
 func multipartStart(content UploadData, settings UploadSettings) startResponse {
 
 	reqParams := startRequestData{
-		ApiKey:        settings.apikey,
+		APIKey:        settings.apikey,
 		StoreLocation: settings.storeLocation,
 		Mimetype:      content.mimetype,
 		Filename:      content.filename,
 		Size:          content.size,
 	}
-	jsonData, _ := json.Marshal(reqParams)
-	size := string(reqParams.Size)
+
+	size := strconv.Itoa(int(reqParams.Size))
+
 	var b bytes.Buffer
 	x := multipart.NewWriter(&b)
-	x.WriteField("apikey", reqParams.ApiKey)
+	x.WriteField("apikey", reqParams.APIKey)
 	x.WriteField("size", size)
 	x.WriteField("filename", reqParams.Filename)
 	x.WriteField("mimetype", reqParams.Mimetype)
 	x.WriteField("store_location", reqParams.StoreLocation)
+
 	err := x.Close()
-	fmt.Println("HHHHHERE:", jsonData)
-	// req, err := http.NewRequest("POST", "https://requestb.in/z9spndz9", bytes.NewBuffer(jsonData))
-	req, err := http.NewRequest("POST", "https://requestb.in/z9spndz9", &b)
+	req, err := http.NewRequest("POST", MultipartStartURL, &b)
 	req.Header.Set("Content-Type", x.FormDataContentType())
-	fmt.Println(req, err)
-	client := &http.Client{}
-	resp, err := client.Do(req)
+
+	resp, err := (&http.Client{}).Do(req)
+	defer resp.Body.Close()
+
 	if err != nil {
 		panic(err)
 	}
-	defer resp.Body.Close()
-	fmt.Println(resp, err)
-	return startResponse{}
+
+	var sresp startResponse
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&sresp); err != nil {
+		panic(err)
+	}
+
+	return sresp
 }
 
 func upload(content UploadData, settings UploadSettings) {
 
-	sr := multipartStart(content, settings)
-	fmt.Println(sr)
+	sresp := multipartStart(content, settings)
+	fmt.Println(sresp)
 
 	partsNumber := int(math.Ceil(float64(content.size) / float64(partSize)))
 
@@ -135,8 +145,6 @@ func upload(content UploadData, settings UploadSettings) {
 
 	partsDone := 0
 	for resp := range rc {
-		fmt.Println(resp)
-
 		partsDone++
 
 		if partsInProgress < partsNumber {
@@ -171,8 +179,7 @@ func main() {
 	stat, err := f.Stat()
 	mimetype := mime.TypeByExtension(path.Ext(filepath))
 	content := UploadData{f, stat.Name(), stat.Size(), mimetype}
-	fmt.Println("CONTENT", content)
-	settings := UploadSettings{"Axz", "s3"}
+	settings := UploadSettings{"AZ25y30ZiRnG7ahX6iMYLz", "s3"}
 	upload(content, settings)
 	// fmt.Println(mime.TypeByExtension(".zip"))
 }
