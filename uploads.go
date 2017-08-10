@@ -84,7 +84,7 @@ type uploadPostRequestData struct {
 	UploadID      string
 }
 
-func reqMake(method string, url string, form map[string]string, str interface{}) error {
+func reqMake(client http.Client, method string, url string, form map[string]string, str interface{}) error {
 	var b bytes.Buffer
 
 	x := multipart.NewWriter(&b)
@@ -96,7 +96,7 @@ func reqMake(method string, url string, form map[string]string, str interface{})
 	req, err := http.NewRequest(method, url, &b)
 	req.Header.Set("Content-Type", x.FormDataContentType())
 
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := (&client).Do(req)
 	defer resp.Body.Close()
 
 	if err != nil {
@@ -113,6 +113,7 @@ func reqMake(method string, url string, form map[string]string, str interface{})
 
 func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response) {
 	reader := io.NewSectionReader(f, 0, size)
+	httpClient := http.Client{}
 	for job := range uc {
 		buff := make([]byte, job.size)
 		reader.Seek(int64(job.offset), 0)
@@ -136,7 +137,7 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 		}
 
 		var uiresp uploadInitResponse
-		err = reqMake("POST", multipartUploadURL, form, &uiresp)
+		err = reqMake(httpClient, "POST", multipartUploadURL, form, &uiresp)
 		if err != nil {
 			panic(err)
 		}
@@ -167,7 +168,9 @@ func multipartStart(content UploadData, settings UploadSettings) startResponse {
 	}
 
 	var sresp startResponse
-	err := reqMake("POST", multipartStartURL, form, &sresp)
+	httpClient := http.Client{}
+
+	err := reqMake(httpClient, "POST", multipartStartURL, form, &sresp)
 	if err != nil {
 		panic(err)
 	}
@@ -189,7 +192,9 @@ func multipartComplete(content UploadData, settings UploadSettings, sresp startR
 	}
 
 	var flink filelinkResponse
-	err := reqMake("POST", multipartCompleteURL, form, &flink)
+	httpClient := http.Client{}
+
+	err := reqMake(httpClient, "POST", multipartCompleteURL, form, &flink)
 	if err != nil {
 		panic(err)
 	}
