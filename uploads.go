@@ -202,6 +202,7 @@ func multipartComplete(content UploadData, settings UploadSettings, sresp startR
 	return flink.URL
 }
 
+// UploadMultipart comment
 func UploadMultipart(content UploadData, settings UploadSettings) string {
 
 	sresp := multipartStart(content, settings)
