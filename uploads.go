@@ -73,14 +73,6 @@ type uploadInitResponse struct {
 	Headers map[string]string
 }
 
-type startRequestData struct {
-	APIKey        string `json:"apikey"`
-	StoreLocation string `json:"store_location"`
-	Mimetype      string `json:"mimetype"`
-	Filename      string `json:"filename"`
-	Size          int64  `json:"size"`
-}
-
 type uploadPostRequestData struct {
 	APIKey        string `json:"apikey"`
 	Part          int
@@ -90,6 +82,33 @@ type uploadPostRequestData struct {
 	URI           string
 	Region        string
 	UploadID      string
+}
+
+func reqMake(method string, url string, form map[string]string, str interface{}) error {
+	var b bytes.Buffer
+
+	x := multipart.NewWriter(&b)
+	for k, v := range form {
+		x.WriteField(k, v)
+	}
+
+	err := x.Close()
+	req, err := http.NewRequest(method, url, &b)
+	req.Header.Set("Content-Type", x.FormDataContentType())
+
+	resp, err := (&http.Client{}).Do(req)
+	defer resp.Body.Close()
+
+	if err != nil {
+		return err
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(str); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response) {
@@ -102,38 +121,27 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 			panic(err)
 		}
 
-		var b bytes.Buffer
-		x := multipart.NewWriter(&b)
-		x.WriteField("apikey", job.apikey)
-		x.WriteField("size", strconv.Itoa(int(job.size)))
-		x.WriteField("store_location", job.storeLocation)
-		x.WriteField("part", strconv.Itoa(int(job.num)))
-		x.WriteField("uri", job.sresp.URI)
-		x.WriteField("region", job.sresp.Region)
-		x.WriteField("upload_id", job.sresp.UploadID)
-
 		h := md5.New()
 		h.Write(buff)
-		x.WriteField("md5", base64.StdEncoding.EncodeToString(h.Sum(nil)))
 
-		err = x.Close()
-		req, err := http.NewRequest("POST", multipartUploadURL, &b)
-		req.Header.Set("Content-Type", x.FormDataContentType())
+		form := map[string]string{
+			"apikey":          job.apikey,
+			"size":            strconv.Itoa(int(job.size)),
+			"store_locatgion": job.storeLocation,
+			"part":            strconv.Itoa(int(job.num)),
+			"uri":             job.sresp.URI,
+			"region":          job.sresp.Region,
+			"upload_id":       job.sresp.UploadID,
+			"md5":             base64.StdEncoding.EncodeToString(h.Sum(nil)),
+		}
 
-		resp, err := (&http.Client{}).Do(req)
-		defer resp.Body.Close()
-
+		var uiresp uploadInitResponse
+		err = reqMake("POST", multipartUploadURL, form, &uiresp)
 		if err != nil {
 			panic(err)
 		}
 
-		var uiresp uploadInitResponse
-		dec := json.NewDecoder(resp.Body)
-		if err := dec.Decode(&uiresp); err != nil {
-			panic(err)
-		}
-
-		req, err = http.NewRequest("PUT", uiresp.URL, bytes.NewReader(buff))
+		req, err := http.NewRequest("PUT", uiresp.URL, bytes.NewReader(buff))
 		for k, v := range uiresp.Headers {
 			req.Header.Set(k, v)
 		}
@@ -150,38 +158,17 @@ func uploadChunk(f io.ReaderAt, size int64, uc chan UploadJob, rc chan Response)
 
 func multipartStart(content UploadData, settings UploadSettings) startResponse {
 
-	reqParams := startRequestData{
-		APIKey:        settings.apikey,
-		StoreLocation: settings.storeLocation,
-		Mimetype:      content.mimetype,
-		Filename:      content.filename,
-		Size:          content.size,
-	}
-
-	size := strconv.Itoa(int(reqParams.Size))
-
-	var b bytes.Buffer
-	x := multipart.NewWriter(&b)
-	x.WriteField("apikey", reqParams.APIKey)
-	x.WriteField("size", size)
-	x.WriteField("filename", reqParams.Filename)
-	x.WriteField("mimetype", reqParams.Mimetype)
-	x.WriteField("store_location", reqParams.StoreLocation)
-
-	err := x.Close()
-	req, err := http.NewRequest("POST", multipartStartURL, &b)
-	req.Header.Set("Content-Type", x.FormDataContentType())
-
-	resp, err := (&http.Client{}).Do(req)
-	defer resp.Body.Close()
-
-	if err != nil {
-		panic(err)
+	form := map[string]string{
+		"apikey":         settings.apikey,
+		"size":           strconv.Itoa(int(content.size)),
+		"filename":       content.filename,
+		"mimetype":       content.mimetype,
+		"store_location": settings.storeLocation,
 	}
 
 	var sresp startResponse
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&sresp); err != nil {
+	err := reqMake("POST", multipartStartURL, form, &sresp)
+	if err != nil {
 		panic(err)
 	}
 
@@ -189,42 +176,30 @@ func multipartStart(content UploadData, settings UploadSettings) startResponse {
 }
 
 func multipartComplete(content UploadData, settings UploadSettings, sresp startResponse, etags string) string {
-	var b bytes.Buffer
-	x := multipart.NewWriter(&b)
-	x.WriteField("apikey", settings.apikey)
-	x.WriteField("uri", sresp.URI)
-	x.WriteField("region", sresp.Region)
-	x.WriteField("upload_id", sresp.UploadID)
-	x.WriteField("filename", content.filename)
-	x.WriteField("size", strconv.Itoa(int(content.size)))
-	x.WriteField("mimetype", content.mimetype)
-	x.WriteField("parts", etags)
-	x.WriteField("store_location", settings.storeLocation)
-
-	err := x.Close()
-	req, err := http.NewRequest("POST", multipartCompleteURL, &b)
-	req.Header.Set("Content-Type", x.FormDataContentType())
-
-	resp, err := (&http.Client{}).Do(req)
-	defer resp.Body.Close()
-
-	if err != nil {
-		panic(err)
+	form := map[string]string{
+		"apikey":         settings.apikey,
+		"uri":            sresp.URI,
+		"region":         sresp.Region,
+		"upload_id":      sresp.UploadID,
+		"filename":       content.filename,
+		"size":           strconv.Itoa(int(content.size)),
+		"mimetype":       content.mimetype,
+		"parts":          etags,
+		"store_location": settings.storeLocation,
 	}
 
 	var flink filelinkResponse
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&flink); err != nil {
+	err := reqMake("POST", multipartCompleteURL, form, &flink)
+	if err != nil {
 		panic(err)
 	}
 
 	return flink.URL
 }
 
-func upload(content UploadData, settings UploadSettings) {
+func UploadMultipart(content UploadData, settings UploadSettings) string {
 
 	sresp := multipartStart(content, settings)
-	fmt.Println(sresp)
 
 	uc := make(chan UploadJob, workersCount) // upload channel
 	rc := make(chan Response, workersCount)  // response channel
@@ -250,16 +225,11 @@ func upload(content UploadData, settings UploadSettings) {
 	bytesLeft := content.size
 	for bytesLeft > 0 {
 		resp := <-rc
-		if etags != "" {
-			etags += ";"
-		}
-		etags += strconv.Itoa(resp.part) + ":" + resp.etag
+		etags += ";" + strconv.Itoa(resp.part) + ":" + resp.etag
 		bytesLeft -= int64(resp.bytesSent)
 	}
 
-	final := multipartComplete(content, settings, sresp, etags)
-	fmt.Println("done", final)
-
+	return multipartComplete(content, settings, sresp, etags[1:])
 }
 
 func main() {
@@ -274,5 +244,7 @@ func main() {
 	mimetype := mime.TypeByExtension(path.Ext(filepath))
 	content := UploadData{f, stat.Name(), stat.Size(), mimetype}
 	settings := UploadSettings{"AZ25y30ZiRnG7ahX6iMYLz", "s3"}
-	upload(content, settings)
+	url := UploadMultipart(content, settings)
+
+	fmt.Println(url)
 }
